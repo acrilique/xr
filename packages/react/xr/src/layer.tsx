@@ -18,6 +18,7 @@ import {
   addEffect,
   context,
   InjectState,
+  Intersection,
   reconciler,
   RootState,
   ThreeElements,
@@ -111,8 +112,8 @@ export function XRLayer({
       }),
     [props.centralAngle, props.centralHorizontalAngle, props.lowerVerticalAngle, props.shape, props.upperVerticalAngle],
   )
-  const store = useLayerStore(pixelWidth, pixelHeight, dpr)
-  useForwardEvents(store, ref, [hasSize, layersEnabled])
+  const layerStore = useLayerStore(pixelWidth, pixelHeight, dpr)
+  useForwardEvents(layerStore, ref, [hasSize, layersEnabled])
   if (!hasSize) {
     return null
   }
@@ -121,7 +122,7 @@ export function XRLayer({
       {src == null && (
         <ChildrenToRenderTarget
           customRender={customRender}
-          store={store}
+          store={layerStore}
           renderPriority={renderPriority}
           renderTargetRef={renderTargetRef}
           layerEntryRef={layersEnabled ? layerEntryRef : undefined}
@@ -131,6 +132,7 @@ export function XRLayer({
       )}
       {layersEnabled ? (
         <XRLayerImplementation
+          layerStore={layerStore}
           renderTargetRef={renderTargetRef}
           layerEntryRef={layerEntryRef}
           pixelWidth={pixelWidth}
@@ -143,6 +145,7 @@ export function XRLayer({
         />
       ) : (
         <FallbackXRLayerImplementation
+          layerStore={layerStore}
           renderTargetRef={renderTargetRef}
           ref={ref}
           {...props}
@@ -167,6 +170,7 @@ export const XRLayerImplementation = forwardRef<
     dpr: number
     renderTargetRef: MutableRefObject<WebGLRenderTarget | undefined | null>
     layerEntryRef: MutableRefObject<XRLayerEntry | undefined | null>
+    layerStore: UseBoundStore<StoreApi<RootState>>
   }
 >(
   (
@@ -191,6 +195,7 @@ export const XRLayerImplementation = forwardRef<
       dpr,
       renderTargetRef,
       layerEntryRef,
+      layerStore,
       ...props
     },
     ref,
@@ -295,6 +300,73 @@ export const XRLayerImplementation = forwardRef<
     })
 
     useImperativeHandle(ref, () => internalRef.current!, [])
+
+    useEffect(() => {
+      const mesh = internalRef.current
+      if (!mesh || !layerStore) {
+        return
+      }
+
+      const originalInstanceRaycast = mesh.raycast
+
+      mesh.raycast = function (raycaster, intersects) {
+        const _mesh = this as Mesh
+        const tempIntersects: Intersection[] = []
+        // Call the original Mesh.prototype.raycast, not the instance's potentially already overridden one
+        Mesh.prototype.raycast.call(_mesh, raycaster, tempIntersects)
+
+        if (tempIntersects.length === 0) {
+          return
+        }
+
+        const layerState = layerStore.getState()
+        const layerScene = layerState.scene
+
+        // If the layer's internal scene has no children (e.g. using src prop)
+        // then the layer mesh itself is the target.
+        if (layerScene.children.length === 0) {
+          for (const intersect of tempIntersects) {
+            intersects.push(intersect)
+          }
+          return
+        }
+
+        // Otherwise, check for intersections with children in the layer's scene
+        const layerCamera = layerState.camera
+        const layerRaycaster = layerState.raycaster
+        const pointer = layerState.pointer
+
+        let childHit = false
+        for (const intersect of tempIntersects) {
+          if (!intersect.uv) {
+            continue
+          }
+          pointer.x = intersect.uv.x * 2 - 1
+          pointer.y = -(intersect.uv.y * 2 - 1) // Y is inverted in NDC
+
+          layerRaycaster.setFromCamera(pointer, layerCamera)
+          const childIntersects = layerRaycaster.intersectObjects(layerScene.children, true)
+
+          if (childIntersects.length > 0) {
+            childHit = true
+            break
+          }
+        }
+
+        if (childHit) {
+          for (const intersect of tempIntersects) {
+            intersects.push(intersect)
+          }
+        }
+      }
+
+      return () => {
+        if (mesh) {
+          mesh.raycast = originalInstanceRaycast
+        }
+      }
+    }, [layerStore, internalRef])
+
     return (
       <mesh {...props} renderOrder={-Infinity} ref={internalRef}>
         <meshBasicMaterial colorWrite={false} />
@@ -312,9 +384,14 @@ export const FallbackXRLayerImplementation = forwardRef<
     pixelHeight: number
     dpr: number
     renderTargetRef: MutableRefObject<WebGLRenderTarget | undefined>
+    layerStore: UseBoundStore<StoreApi<RootState>>
   }
->(({ src, renderTargetRef, dpr, renderOrder, pixelWidth, pixelHeight, ...props }, ref) => {
+>(({ src, renderTargetRef, dpr, renderOrder, pixelWidth, pixelHeight, layerStore, ...props }, ref) => {
   const materialRef = useRef<MeshBasicMaterial>(null)
+  const meshRef = useRef<Mesh>(null)
+
+  useImperativeHandle(ref, () => meshRef.current!, [])
+
   useEffect(() => {
     if (materialRef.current == null) {
       return
@@ -331,8 +408,71 @@ export const FallbackXRLayerImplementation = forwardRef<
       texture.dispose()
     }
   }, [src, pixelWidth, pixelHeight, dpr, renderTargetRef])
+
+  useEffect(() => {
+    const mesh = meshRef.current
+    if (!mesh || !layerStore) {
+      return
+    }
+
+    const originalInstanceRaycast = mesh.raycast
+
+    mesh.raycast = function (raycaster, intersects) {
+      const _mesh = this as Mesh
+      const tempIntersects: Intersection[] = []
+      Mesh.prototype.raycast.call(_mesh, raycaster, tempIntersects)
+
+      if (tempIntersects.length === 0) {
+        return
+      }
+
+      const layerState = layerStore.getState()
+      const layerScene = layerState.scene
+
+      if (layerScene.children.length === 0) {
+        for (const intersect of tempIntersects) {
+          intersects.push(intersect)
+        }
+        return
+      }
+
+      const layerCamera = layerState.camera
+      const layerRaycaster = layerState.raycaster
+      const pointer = layerState.pointer
+
+      let childHit = false
+      for (const intersect of tempIntersects) {
+        if (!intersect.uv) {
+          continue
+        }
+        pointer.x = intersect.uv.x * 2 - 1
+        pointer.y = -(intersect.uv.y * 2 - 1)
+
+        layerRaycaster.setFromCamera(pointer, layerCamera)
+        const childIntersects = layerRaycaster.intersectObjects(layerScene.children, true)
+
+        if (childIntersects.length > 0) {
+          childHit = true
+          break
+        }
+      }
+
+      if (childHit) {
+        for (const intersect of tempIntersects) {
+          intersects.push(intersect)
+        }
+      }
+    }
+
+    return () => {
+      if (mesh) {
+        mesh.raycast = originalInstanceRaycast
+      }
+    }
+  }, [layerStore, meshRef])
+
   return (
-    <mesh ref={ref} {...props}>
+    <mesh ref={meshRef} {...props}>
       <meshBasicMaterial ref={materialRef} toneMapped={false} />
     </mesh>
   )
