@@ -30,7 +30,7 @@ export function App() {
       >
         <PointerEvents />
         <XR store={store}>
-          <Text scale={0.03} color="black" position={[-0.6, 0.28, -0.5]}>
+          <Text scale={0.03} color="black" rotation-y={Math.PI / 16} position={[-0.6, 0.28, -0.5]}>
             32x32 XRLayer with DPR=32
           </Text>
           <XROrigin position={[0, -1.5, 0]} />
@@ -42,6 +42,7 @@ export function App() {
             position={[-0.6, 0, -0.5]}
             scale={0.5}
             shape="quad"
+            blendTextureSourceAlpha={true}
           >
             <mesh>
               <boxGeometry />
@@ -54,10 +55,10 @@ export function App() {
           </Text>
           <XRLayer position={[0, 0, -0.5]} onClick={() => video.play()} scale={0.5} shape="quad" src={video} />
 
-          <Text scale={0.03} color="black" position={[0.6, 0.28, -0.5]}>
+          <Text scale={0.03} color="black" rotation-y={-Math.PI / 16} position={[0.6, 0.28, -0.5]}>
             Without XRLayer
           </Text>
-          <mesh rotation-y={-Math.PI / 16} position={[0.6, 0, -0.5]} scale={0.5}>
+          <mesh onClick={() => video.play()} rotation-y={-Math.PI / 16} position={[0.6, 0, -0.5]} scale={0.5}>
             <planeGeometry />
             <meshBasicMaterial map={videoTexture} toneMapped={false} />
           </mesh>
