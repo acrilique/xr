@@ -64,6 +64,7 @@ export type XRLayerProperties = XRLayerOptions &
     dpr?: number
     src?: Exclude<XRLayerSrc, WebGLRenderTarget>
     customRender?: (target: WebGLRenderTarget, state: RootState, delta: number, frame: XRFrame | undefined) => void
+    precisePointerEvents?: boolean
   }
 
 /**
@@ -88,6 +89,7 @@ export function XRLayer({
   renderPriority = 0,
   children,
   customRender,
+  precisePointerEvents = false,
   ...props
 }: XRLayerProperties) {
   const [hasSize, setHasSize] = useState(false)
@@ -113,6 +115,68 @@ export function XRLayer({
   )
   const store = useLayerStore(pixelWidth, pixelHeight, dpr)
   useForwardEvents(store, ref, [hasSize, layersEnabled])
+
+  useEffect(() => {
+    const mesh = ref.current
+    if (!precisePointerEvents || !mesh || src != null || !store || !hasSize || !layersEnabled) {
+      //if precisePointerEvents is false, or other conditions not met, use original raycast
+      if (mesh && mesh.userData.originalRaycast) {
+        mesh.raycast = mesh.userData.originalRaycast
+        delete mesh.userData.originalRaycast
+      }
+      return
+    }
+
+    //store original raycast to handle dynamic prop changes
+    //TODO: not use userData
+    if (!mesh.userData.originalRaycast) {
+      mesh.userData.originalRaycast = mesh.raycast.bind(mesh)
+    }
+    const originalRaycast = mesh.userData.originalRaycast
+
+    const internalRaycaster = new Raycaster()
+
+    mesh.raycast = (raycaster, intersects) => {
+      const initialIntersectCount = intersects.length
+      originalRaycast(raycaster, intersects) //populate 'intersects'
+
+      if (intersects.length > initialIntersectCount) {
+        const newIntersectsForThisMesh = intersects.slice(initialIntersectCount)
+        const validNewIntersects = []
+
+        for (const intersect of newIntersectsForThisMesh) {
+          if (intersect.object === mesh && intersect.uv) {
+            const layerState = store.getState()
+            if (layerState.camera && layerState.scene && intersect.uv) {
+              //convert UV coordinates [0,1] to NDC coordinates [-1,1]
+              const ndcCoords = new Vector2(intersect.uv.x * 2 - 1, intersect.uv.y * 2 - 1)
+              internalRaycaster.setFromCamera(ndcCoords, layerState.camera)
+              const internalHits = internalRaycaster.intersectObjects(layerState.scene.children, true)
+
+              if (internalHits.length > 0) {
+                validNewIntersects.push(intersect) //hit something in the inner scene, keep it
+              }
+            } else {
+              //layer state not fully ready, or UVs missing, conservatively keep.
+              validNewIntersects.push(intersect)
+            }
+          } else {
+            validNewIntersects.push(intersect)
+          }
+        }
+        intersects.length = initialIntersectCount
+        intersects.push(...validNewIntersects)
+      }
+    }
+
+    return () => {
+      if (mesh && mesh.userData.originalRaycast) {
+        mesh.raycast = mesh.userData.originalRaycast
+        delete mesh.userData.originalRaycast
+      }
+    }
+  }, [ref, store, src, hasSize, layersEnabled, precisePointerEvents])
+
   if (!hasSize) {
     return null
   }
